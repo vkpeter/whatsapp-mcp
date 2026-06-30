@@ -834,6 +834,34 @@ func startRESTServer(client *whatsmeow.Client, messageStore *MessageStore, port 
 	}()
 }
 
+// waitForConnection blocks until the client reports a live, logged-in
+// connection or the timeout elapses. It tolerates transient websocket drops
+// (e.g. close 1006) by relying on whatsmeow's automatic reconnection: instead
+// of failing on the first unsuccessful check, it keeps polling and also wakes
+// up immediately whenever a Connected event is delivered on connected.
+func waitForConnection(client *whatsmeow.Client, connected <-chan bool, timeout time.Duration, logger waLog.Logger) bool {
+	fmt.Println("Waiting for a stable connection to WhatsApp...")
+
+	deadline := time.After(timeout)
+	ticker := time.NewTicker(2 * time.Second)
+	defer ticker.Stop()
+
+	for {
+		if client.IsConnected() && client.IsLoggedIn() {
+			return true
+		}
+
+		select {
+		case <-connected:
+			// A Connected event arrived; loop around to re-check the state.
+		case <-ticker.C:
+			// Periodic poll while auto-reconnect works in the background.
+		case <-deadline:
+			return client.IsConnected() && client.IsLoggedIn()
+		}
+	}
+}
+
 func main() {
 	// Set up logger
 	logger := waLog.Stdout("Client", "INFO", true)
@@ -882,6 +910,10 @@ func main() {
 	}
 	defer messageStore.Close()
 
+	// Create channel to track connection success. Buffered so the event
+	// handler never blocks when signalling a (re)connection.
+	connected := make(chan bool, 1)
+
 	// Setup event handling for messages and history sync
 	client.AddEventHandler(func(evt interface{}) {
 		switch v := evt.(type) {
@@ -895,14 +927,37 @@ func main() {
 
 		case *events.Connected:
 			logger.Infof("Connected to WhatsApp")
+			// Signal that the connection is up (non-blocking).
+			select {
+			case connected <- true:
+			default:
+			}
+
+		case *events.Disconnected:
+			// A clean disconnect. whatsmeow's automatic reconnection is
+			// enabled by default and will re-establish the socket, so this
+			// is informational rather than fatal.
+			logger.Warnf("Disconnected from WhatsApp; automatic reconnection will be attempted")
+
+		case *events.ConnectFailure:
+			logger.Errorf("Connection failure: %v", v.Reason)
+
+		case *events.StreamReplaced:
+			logger.Errorf("Stream replaced: the session was opened on another device")
+
+		case *events.KeepAliveTimeout:
+			// Keepalive pings to WhatsApp are timing out. This is the usual
+			// precursor to a "websocket: close 1006 (abnormal closure)" read
+			// error; the connection will be torn down and reconnected.
+			logger.Warnf("Keepalive timeout, connection is unstable; reconnecting")
+
+		case *events.KeepAliveRestored:
+			logger.Infof("Keepalive restored, connection is healthy again")
 
 		case *events.LoggedOut:
 			logger.Warnf("Device logged out, please scan QR code to log in again")
 		}
 	})
-
-	// Create channel to track connection success
-	connected := make(chan bool, 1)
 
 	// Connect to WhatsApp
 	if client.Store.ID == nil {
@@ -920,18 +975,9 @@ func main() {
 				fmt.Println("\nScan this QR code with your WhatsApp app:")
 				qrterminal.GenerateHalfBlock(evt.Code, qrterminal.L, os.Stdout)
 			} else if evt.Event == "success" {
-				connected <- true
+				fmt.Println("\nSuccessfully paired with WhatsApp!")
 				break
 			}
-		}
-
-		// Wait for connection
-		select {
-		case <-connected:
-			fmt.Println("\nSuccessfully connected and authenticated!")
-		case <-time.After(3 * time.Minute):
-			logger.Errorf("Timeout waiting for QR code scan")
-			return
 		}
 	} else {
 		// Already logged in, just connect
@@ -940,14 +986,20 @@ func main() {
 			logger.Errorf("Failed to connect: %v", err)
 			return
 		}
-		connected <- true
 	}
 
-	// Wait a moment for connection to stabilize
-	time.Sleep(2 * time.Second)
-
-	if !client.IsConnected() {
-		logger.Errorf("Failed to establish stable connection")
+	// Wait for a stable connection before starting the REST server.
+	//
+	// whatsmeow enables automatic reconnection by default, so transient
+	// startup failures such as
+	//   "Error reading from websocket: websocket: close 1006 (abnormal
+	//    closure): unexpected EOF"
+	// are recovered from in the background. Rather than checking
+	// IsConnected() once and bailing out, poll until the client reports a
+	// live, logged-in session (or until we give up after a generous
+	// timeout), giving the reconnect logic time to do its job.
+	if !waitForConnection(client, connected, 3*time.Minute, logger) {
+		logger.Errorf("Failed to establish a stable WhatsApp connection")
 		return
 	}
 
