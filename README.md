@@ -269,4 +269,8 @@ By default, just the metadata of the media is stored in the local database. The 
 - **No Messages Loading**: After initial authentication, it can take several minutes for your message history to load, especially if you have many chats.
 - **WhatsApp Out of Sync**: If your WhatsApp messages get out of sync with the bridge, delete both database files (`whatsapp-bridge/store/messages.db` and `whatsapp-bridge/store/whatsapp.db`) and restart the bridge to re-authenticate.
 
+### Connection Issues
+
+- **`Error reading from websocket: websocket: close 1006 (abnormal closure): unexpected EOF`**: This means WhatsApp closed the underlying web socket — usually a transient network blip or a routine keepalive timeout. The bridge enables whatsmeow's automatic reconnection and waits for a stable, logged-in session on startup (up to 3 minutes) instead of exiting on the first failed check, so an occasional 1006 in the logs is expected and recovers on its own. If the bridge logs the error repeatedly and never reaches `✓ Connected to WhatsApp!`, check that outbound traffic to WhatsApp's servers isn't blocked by a firewall, VPN, or proxy, and that your session hasn't been logged out from your phone (Settings > Linked Devices). If the session was removed, delete `whatsapp-bridge/store/whatsapp.db` and restart to re-scan the QR code.
+
 For additional Claude Desktop integration troubleshooting, see the [MCP documentation](https://modelcontextprotocol.io/quickstart/server#claude-for-desktop-integration-issues). The documentation includes helpful tips for checking logs and resolving common issues.
