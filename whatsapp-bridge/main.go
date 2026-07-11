@@ -24,6 +24,7 @@ import (
 
 	"go.mau.fi/whatsmeow"
 	waProto "go.mau.fi/whatsmeow/binary/proto"
+	wastore "go.mau.fi/whatsmeow/store"
 	"go.mau.fi/whatsmeow/store/sqlstore"
 	"go.mau.fi/whatsmeow/types"
 	"go.mau.fi/whatsmeow/types/events"
@@ -867,6 +868,11 @@ func main() {
 	logger := waLog.Stdout("Client", "INFO", true)
 	logger.Infof("Starting WhatsApp client...")
 
+	// Name the linked device so it is identifiable in WhatsApp's
+	// "Linked devices" list (instead of the default "whatsmeow"). This is
+	// applied when pairing, so it only affects new logins.
+	wastore.DeviceProps.Os = proto.String("WhatsApp MCP")
+
 	// Create database connection for storing session data
 	dbLog := waLog.Stdout("Database", "INFO", true)
 
@@ -927,6 +933,13 @@ func main() {
 
 		case *events.Connected:
 			logger.Infof("Connected to WhatsApp")
+			// Re-announce presence on every (re)connection, not just at
+			// startup. WhatsApp unlinks companion devices it considers
+			// inactive, so making sure each reconnect is followed by an
+			// "available" presence keeps this session looking active.
+			if err := client.SendPresence(context.Background(), types.PresenceAvailable); err != nil {
+				logger.Warnf("Failed to send presence after connect: %v", err)
+			}
 			// Signal that the connection is up (non-blocking).
 			select {
 			case connected <- true:
@@ -955,7 +968,11 @@ func main() {
 			logger.Infof("Keepalive restored, connection is healthy again")
 
 		case *events.LoggedOut:
-			logger.Warnf("Device logged out, please scan QR code to log in again")
+			// WhatsApp removed this linked device (usually because the
+			// bridge and/or the phone was offline for too long). whatsmeow
+			// has already deleted the local session, so the only way back
+			// is a fresh pairing.
+			logger.Warnf("Device was logged out by WhatsApp. This usually happens when the bridge has been offline for an extended period. Restart the bridge and scan the QR code to pair again. To reduce how often this happens, keep the bridge running continuously and your phone online (see README).")
 		}
 	})
 
@@ -1005,8 +1022,23 @@ func main() {
 
 	fmt.Println("\n✓ Connected to WhatsApp! Type 'help' for commands.")
 
-	// Send presence to ensure WhatsApp knows we're online and pushes pending sync data
-	client.SendPresence(context.Background(), types.PresenceAvailable)
+	// Periodically refresh our "available" presence so WhatsApp keeps
+	// treating this linked device as active. The Connected event handler
+	// already sends presence on every (re)connect; this ticker covers long
+	// stretches where the connection stays up without reconnecting.
+	// WhatsApp unlinks companion devices it considers inactive, which is
+	// the usual cause of the periodic forced re-authentication.
+	go func() {
+		ticker := time.NewTicker(4 * time.Hour)
+		defer ticker.Stop()
+		for range ticker.C {
+			if client.IsConnected() && client.IsLoggedIn() {
+				if err := client.SendPresence(context.Background(), types.PresenceAvailable); err != nil {
+					logger.Warnf("Failed to refresh presence: %v", err)
+				}
+			}
+		}
+	}()
 
 	// Start REST API server
 	startRESTServer(client, messageStore, 8080)

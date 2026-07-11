@@ -60,7 +60,7 @@ A new `/api/sync` endpoint on the Go bridge allows requesting history sync for s
 
    The first time you run it, you will be prompted to scan a QR code. Scan the QR code with your WhatsApp mobile app to authenticate.
 
-   After approximately 20 days, you will might need to re-authenticate.
+   If the bridge is only run occasionally, WhatsApp may unlink the device after roughly 20 days and you will need to re-authenticate. See [Reducing how often you need to re-authenticate](#reducing-how-often-you-need-to-re-authenticate) for how to largely avoid this.
 
    > **Tip:** Run the bridge (and optionally the MCP server) inside a [tmux](https://github.com/tmux/tmux/wiki) session so they keep running after you close your terminal:
    >
@@ -260,6 +260,47 @@ By default, just the metadata of the media is stored in the local database. The 
 
 - If you encounter permission issues when running uv, you may need to add it to your PATH or use the full path to the executable.
 - Make sure both the Go application and the Python server are running for the integration to work properly.
+
+### Reducing how often you need to re-authenticate
+
+The periodic forced re-authentication (often after ~20 days) is a WhatsApp server-side policy, not a bug in the bridge: WhatsApp removes linked companion devices that it considers inactive or that stay offline for an extended period. There is no way for a client to opt out of this entirely, but in practice you can make logouts rare:
+
+- **Keep the bridge running 24/7.** This is by far the biggest factor. Every time the bridge is offline it accrues "inactivity" from WhatsApp's point of view, and long offline stretches are what trigger device removal. While connected, the bridge maintains keepalive pings, automatically reconnects after network drops, and periodically refreshes its "available" presence so the session keeps looking active. Run it under a process supervisor so it survives reboots and crashes:
+
+  **Linux (systemd)** — create `/etc/systemd/system/whatsapp-bridge.service`:
+
+  ```ini
+  [Unit]
+  Description=WhatsApp MCP bridge
+  After=network-online.target
+  Wants=network-online.target
+
+  [Service]
+  WorkingDirectory=/path/to/whatsapp-mcp/whatsapp-bridge
+  ExecStart=/path/to/whatsapp-mcp/whatsapp-bridge/whatsapp-bridge
+  Restart=always
+  RestartSec=5
+
+  [Install]
+  WantedBy=multi-user.target
+  ```
+
+  Build the binary first with `go build -o whatsapp-bridge main.go`, then `sudo systemctl enable --now whatsapp-bridge`. For the initial QR pairing, run the bridge once in a terminal before enabling the service (the QR code is hard to scan from journal logs).
+
+  **macOS** — use a `launchd` agent with `KeepAlive`, or simply keep it in a `tmux` session on a machine that doesn't sleep. Note that a laptop that sleeps overnight counts as offline time; a small always-on machine (home server, Raspberry Pi, cheap VPS) is the most reliable host.
+
+- **Keep your phone online.** WhatsApp disconnects all linked devices if the primary phone is offline for more than about 14 days. The phone doesn't need to stay on the same network, it just needs to connect to the internet with WhatsApp installed reasonably often.
+
+- **Keep the whatsmeow dependency up to date.** WhatsApp occasionally rejects or logs out clients running outdated protocol versions (e.g. the `client outdated (405)` connect failure). If logouts become frequent, update and rebuild:
+
+  ```bash
+  cd whatsapp-bridge
+  go get -u go.mau.fi/whatsmeow && go mod tidy && go build
+  ```
+
+- **Don't pair more sessions than you need.** Each QR scan creates a new linked device; old stale ones can be removed on your phone under **Settings > Linked Devices**.
+
+When a logout does happen, the bridge logs a clear warning. Just restart it and scan the QR code again — message history in `store/messages.db` is preserved.
 
 ### Authentication Issues
 
