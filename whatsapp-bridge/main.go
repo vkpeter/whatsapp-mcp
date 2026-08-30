@@ -796,8 +796,10 @@ func startRESTServer(client *whatsmeow.Client, messageStore *MessageStore, port 
 			ChatJID string `json:"chat_jid"`
 		}
 		if err := json.NewDecoder(r.Body).Decode(&req); err != nil || req.ChatJID == "" {
-			// No specific chat - request general sync
-			requestHistorySync(client, messageStore)
+			// No specific chat - request general sync in the background and
+			// respond immediately (the full sync walks every known chat with
+			// a pause between requests, so it can take a couple of minutes).
+			go requestHistorySync(client, messageStore)
 			json.NewEncoder(w).Encode(map[string]interface{}{
 				"success": true,
 				"message": "General history sync requested.",
@@ -1038,6 +1040,10 @@ func main() {
 
 	// Send presence to ensure WhatsApp knows we're online and pushes pending sync data
 	client.SendPresence(context.Background(), types.PresenceAvailable)
+
+	// Auto-sync recent messages in the background, so messages that arrived
+	// while the bridge was offline get fetched on every (re)connect.
+	startAutoSync(client, messageStore)
 
 	// Start REST API server
 	startRESTServer(client, messageStore, 8080)
@@ -1343,9 +1349,27 @@ func requestHistorySync(client *whatsmeow.Client, messageStore *MessageStore) {
 			continue
 		}
 		requested++
+
+		// Small pause between requests: each peer message encrypts into the
+		// session store, and firing 700+ back-to-back caused SQLITE_BUSY
+		// (database is locked) write-storms on the sqlite session store.
+		time.Sleep(150 * time.Millisecond)
 	}
 
 	fmt.Printf("Requested recent history sync for %d chats.\n", requested)
+}
+
+// startAutoSync kicks off a recent-message sync in the background shortly
+// after a (re)connection. This recovers messages that arrived while the
+// bridge was offline. It runs in its own goroutine so it never blocks the
+// REST server or the event loop.
+func startAutoSync(client *whatsmeow.Client, messageStore *MessageStore) {
+	go func() {
+		// Give WhatsApp a moment to push its own recent-sync first, then
+		// request on-demand history for every known chat.
+		time.Sleep(5 * time.Second)
+		requestHistorySync(client, messageStore)
+	}()
 }
 
 func requestChatSync(client *whatsmeow.Client, messageStore *MessageStore, chatJIDStr string) error {
