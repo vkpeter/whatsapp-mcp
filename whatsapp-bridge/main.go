@@ -24,6 +24,7 @@ import (
 
 	"go.mau.fi/whatsmeow"
 	waProto "go.mau.fi/whatsmeow/binary/proto"
+	"go.mau.fi/whatsmeow/store"
 	"go.mau.fi/whatsmeow/store/sqlstore"
 	"go.mau.fi/whatsmeow/types"
 	"go.mau.fi/whatsmeow/types/events"
@@ -901,6 +902,14 @@ func main() {
 		return
 	}
 
+	// Advertise on-demand history sync support to the phone. whatsmeow's
+	// default DeviceProps leave OnDemandReady/CompleteOnDemandReady nil, so
+	// the phone never answers BuildHistorySyncRequest (on-demand sync). These
+	// props are sent during pairing/registration; for an already-paired device
+	// they take effect after the next re-pairing.
+	store.DeviceProps.HistorySyncConfig.OnDemandReady = proto.Bool(true)
+	store.DeviceProps.HistorySyncConfig.CompleteOnDemandReady = proto.Bool(true)
+
 	// Initialize message store
 	messageStore, err := NewMessageStore()
 	if err != nil {
@@ -1323,7 +1332,12 @@ func requestHistorySync(client *whatsmeow.Client, messageStore *MessageStore) {
 			Timestamp: time.Now(),
 		}
 		historyMsg := client.BuildHistorySyncRequest(msgInfo, 100)
-		_, err = client.SendMessage(context.Background(), client.Store.ID.ToNonAD(), historyMsg)
+		// Must be sent as a peer message (Peer: true) — BuildHistorySyncRequest
+		// builds a PEER_DATA_OPERATION request that the phone only answers when
+		// it arrives as a peer message. Sending it via plain SendMessage to our
+		// own JID silently drops the request, so no HistorySync event ever comes
+		// back and missed messages are never fetched.
+		_, err = client.SendPeerMessage(context.Background(), historyMsg)
 		if err != nil {
 			fmt.Printf("Failed to request history sync for %s: %v\n", chatJIDStr, err)
 			continue
@@ -1368,7 +1382,7 @@ func requestChatSync(client *whatsmeow.Client, messageStore *MessageStore, chatJ
 			Timestamp: oldestTimestamp,
 		}
 		historyMsg := client.BuildHistorySyncRequest(msgInfo, 50)
-		_, err = client.SendMessage(context.Background(), client.Store.ID.ToNonAD(), historyMsg)
+		_, err = client.SendPeerMessage(context.Background(), historyMsg)
 		if err != nil {
 			return fmt.Errorf("failed to send sync request: %v", err)
 		}
@@ -1384,7 +1398,7 @@ func requestChatSync(client *whatsmeow.Client, messageStore *MessageStore, chatJ
 			Timestamp: time.Now(),
 		}
 		historyMsg := client.BuildHistorySyncRequest(msgInfo, 50)
-		_, err = client.SendMessage(context.Background(), client.Store.ID.ToNonAD(), historyMsg)
+		_, err = client.SendPeerMessage(context.Background(), historyMsg)
 		if err != nil {
 			return fmt.Errorf("failed to send sync request: %v", err)
 		}
