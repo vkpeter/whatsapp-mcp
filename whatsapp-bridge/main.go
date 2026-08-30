@@ -990,15 +990,17 @@ func main() {
 			qrterminal.GenerateHalfBlock(firstQR.Code, qrterminal.L, os.Stdout)
 			if phone := os.Getenv("WA_PAIR_PHONE"); phone != "" {
 				go func() {
-					for client.Store.ID == nil {
-						pairCode, pairErr := client.PairPhone(context.Background(), phone, false, whatsmeow.PairClientChrome, "Chrome (Windows)")
-						if pairErr != nil {
-							logger.Errorf("PairPhone failed: %v", pairErr)
-							return
-						}
-						fmt.Printf("\nPAIR_CODE:%s\n", pairCode)
-						time.Sleep(80 * time.Second)
+					// Generate ONE pairing code and keep it. The previous
+					// implementation looped and minted a new code every 80s,
+					// invalidating the code the user was still typing. A code
+					// stays valid until pairing succeeds (or it expires after
+					// ~160s); on expiry, restart the bridge for a fresh one.
+					pairCode, pairErr := client.PairPhone(context.Background(), phone, false, whatsmeow.PairClientChrome, "Chrome (Windows)")
+					if pairErr != nil {
+						logger.Errorf("PairPhone failed: %v", pairErr)
+						return
 					}
+					fmt.Printf("\nPAIR_CODE:%s\n", pairCode)
 				}()
 			}
 		}
