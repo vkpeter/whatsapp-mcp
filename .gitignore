@@ -3,3 +3,5 @@
 claude_desktop_config.json
 whatsapp.log
 *.exe~
+# NSSM-binary wordt bewust mee-versioned (zie whatsapp-bridge/tools/README.md)
+!whatsapp-bridge/tools/nssm/
